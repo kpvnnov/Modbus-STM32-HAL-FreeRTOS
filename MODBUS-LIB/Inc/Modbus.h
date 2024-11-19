@@ -32,7 +32,8 @@ typedef enum
 {
     MB_SLAVE = 3,
     MB_MASTER = 4,
-    MB_GATE = 5
+    MB_SLAVE_GATE = 5, //GateWay Slave
+    MB_MASTER_GATE = 6, //GateWay Master
 }mb_masterslave_t ;
 
 typedef enum
@@ -153,6 +154,7 @@ typedef struct
     uint32_t   xIpAddress;
     uint16_t u16Port;
     uint8_t  u8clientID;
+    uint16_t u16TransactionID; //нужен для гейта
 #endif
 }
 modbus_t;

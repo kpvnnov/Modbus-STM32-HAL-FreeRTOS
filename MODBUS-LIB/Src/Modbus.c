@@ -211,7 +211,7 @@ void ModbusInit(modbusHandler_t * modH)
 
 	  RingClear(&modH->xBufferRX);
 
-	  if(modH->uModbusType == MB_SLAVE)
+	  if(modH->uModbusType == MB_SLAVE || modH->uModbusType == MB_SLAVE_GATE)
 	  {
 		  //Create Modbus task slave
 #if ENABLE_TCP == 1
@@ -228,24 +228,7 @@ void ModbusInit(modbusHandler_t * modH)
 
 
 	  }
-	  else if(modH->uModbusType == MB_GATE)
-	  {
-		  //Create Modbus task slave
-#if ENABLE_TCP == 1
-		  if( modH->xTypeHW == TCP_HW)
-		  {
-			  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributesTCP);
-		  }
-		  else{
-			  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributes);
-		  }
-#else
-		  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributes);
-#endif
-
-
-	  }
-	  else if (modH->uModbusType == MB_MASTER)
+	  else if (modH->uModbusType == MB_MASTER || modH->uModbusType == MB_MASTER_GATE)
 	  {
 		  //Create Modbus task Master  and Queue for telegrams
 
@@ -471,7 +454,7 @@ void vTimerCallbackT35(TimerHandle_t *pxTimer)
 	{
 
 		if( (TimerHandle_t *)mHandlers[i]->xTimerT35 ==  pxTimer ){
-			if(mHandlers[i]->uModbusType == MB_MASTER)
+			if(mHandlers[i]->uModbusType == MB_MASTER || mHandlers[i]->uModbusType == MB_MASTER_GATE)
 			{
 				xTimerStop(mHandlers[i]->xTimerTimeout,0);
 			}
@@ -735,6 +718,55 @@ void StartTaskModbusSlave(void *argument)
 #endif
 	 }
 
+    if (modH->uModbusType == MB_SLAVE_GATE && modH->xTypeHW == TCP_HW){ //пока прописываем жесткие условия, что гейт работает со слейва TCP
+     //the packet needs to be sent to another port(gate) without processing
+     //сначала найдём modH в который будем отправлять, для демки сделаем по адресу запроса
+     modbusHandler_t *modH_gate;
+     modbus_t telegram;
+	xSemaphoreTake(modH->ModBusSphrHandle , portMAX_DELAY); //before processing the message get the semaphore
+
+	 switch(modH->u8Buffer[ FUNC ] )
+	 {
+		case MB_FC_READ_COILS:
+		case MB_FC_READ_DISCRETE_INPUT:
+		case MB_FC_READ_INPUT_REGISTER:
+		case MB_FC_READ_REGISTERS :
+ telegram.u16RegAdd = word( modH->u8Buffer[ ADD_HI ], modH->u8Buffer[ ADD_LO ] ); // start address in slave
+ telegram.u16CoilsNo = word( modH->u8Buffer[ NB_HI ], modH->u8Buffer[ NB_LO ] ); // number of elements (coils or registers) to read
+			break;
+	     default: 
+          xSemaphoreGive(modH->ModBusSphrHandle); //Release the semaphore
+          continue;
+	 }
+
+     if (modH->u8Buffer[ID]>=1 && modH->u8Buffer[ID]<=5){
+        telegram.u8id = modH->u8Buffer[ID]; // slave address
+telegram.u8fct=modH->u8Buffer[ FUNC ];// function code
+       switch(modH->u8Buffer[ID]){
+          case 1: modH_gate = &ModbusH1; telegram.u16reg= ModbusDATA1; break;
+          case 2: modH_gate = &ModbusH2; telegram.u16reg= ModbusDATA2; break;
+          case 3: modH_gate = &ModbusH3; telegram.u16reg= ModbusDATA3; break;
+          case 4: modH_gate = &ModbusH4; telegram.u16reg= ModbusDATA4; break;
+          case 5: modH_gate = &ModbusH5; telegram.u16reg= ModbusDATA5; break;
+       }
+     }else{
+        xSemaphoreGive(modH->ModBusSphrHandle); //Release the semaphore
+        continue;
+     }
+
+//<s>если это мастер и он хардварный, то надо установить modH_gate->u16TransactionID из текущего, чтобы потом отправить в ответе</s>
+//нельзя так делать, так как там очередь telegram
+//добавил в структуру telegram сохранение u16TransactionID запроса
+
+         telegram.u16TransactionID=modH->u16TransactionID;
+//в modH->newconnIndex находится номер из таблицы коннектов куда надо отправить ответ
+//его надо положить в telegram->u8clientID который отдадим на MASTER
+         telegram.u8clientID=modH->newconnIndex;
+         ModbusQuery(modH_gate, &telegram); // make a query
+	 xSemaphoreGive(modH->ModBusSphrHandle); //Release the semaphore
+
+    }else{
+
 	  // validate message: CRC, FCT, address and size
     uint8_t u8exception = validateRequest(modH);
 	if (u8exception > 0)
@@ -792,6 +824,7 @@ void StartTaskModbusSlave(void *argument)
 
 
 	 xSemaphoreGive(modH->ModBusSphrHandle); //Release the semaphore
+       }//else MB_SLAVE
 
 	 continue;
 
@@ -1174,6 +1207,16 @@ void StartTaskModbusMaster(void *argument)
 	  xTimerStop(modH->xTimerTimeout,0); // cancel timeout timer
 
 
+    if (modH->uModbusType == MB_MASTER_GATE){
+     //the packet needs to be re sent to another port(gate) without processing
+     //сначала найдём modH в который будем отправлять ответ, в telegram есть первоначальный запрос
+  modbusHandler_t *modH_gate = 
+	xSemaphoreTake(modH_gate->ModBusSphrHandle , portMAX_DELAY); //before processing the message get the semaphore
+	 xSemaphoreGive(modH_gate->ModBusSphrHandle); //Release the semaphore
+         xTaskNotify((TaskHandle_t)telegram.u32CurrentTask, ERR_OK_QUERY, eSetValueWithOverwrite);
+
+    }else{
+
 	  // validate message: id, CRC, FCT, exception
 	  int8_t u8exception = validateAnswer(modH);
 	  if (u8exception != 0)
@@ -1217,7 +1260,7 @@ void StartTaskModbusMaster(void *argument)
 		  xTaskNotify((TaskHandle_t)telegram.u32CurrentTask, ERR_OK_QUERY, eSetValueWithOverwrite);
 	  }
 
-
+	 }
 	  continue;
 	 }
 
