@@ -31,7 +31,8 @@ typedef enum
 typedef enum
 {
     MB_SLAVE = 3,
-    MB_MASTER = 4
+    MB_MASTER = 4,
+    MB_GATE = 5
 }mb_masterslave_t ;
 
 typedef enum

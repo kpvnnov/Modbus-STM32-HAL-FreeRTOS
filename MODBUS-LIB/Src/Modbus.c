@@ -228,6 +228,23 @@ void ModbusInit(modbusHandler_t * modH)
 
 
 	  }
+	  else if(modH->uModbusType == MB_GATE)
+	  {
+		  //Create Modbus task slave
+#if ENABLE_TCP == 1
+		  if( modH->xTypeHW == TCP_HW)
+		  {
+			  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributesTCP);
+		  }
+		  else{
+			  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributes);
+		  }
+#else
+		  modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusGate, modH, &myTaskModbusA_attributes);
+#endif
+
+
+	  }
 	  else if (modH->uModbusType == MB_MASTER)
 	  {
 		  //Create Modbus task Master  and Queue for telegrams
