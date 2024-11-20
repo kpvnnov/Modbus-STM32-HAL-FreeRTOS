@@ -59,6 +59,8 @@ const osThreadAttr_t myTaskModbusA_attributesTCP = {
 //osThreadId_t myTaskModbusAHandle;
 const osThreadAttr_t myTaskModbusB_attributes = { .name = "TaskModbusMaster",
 		.priority = (osPriority_t) osPriorityNormal, .stack_size = 128 * 4 };
+//		.priority = (osPriority_t) osPriorityAboveNormal, .stack_size = 128 * 4 };
+
 
 const osThreadAttr_t myTaskModbusB_attributesTCP = { .name = "TaskModbusMaster",
 		.priority = (osPriority_t) osPriorityNormal, .stack_size = 256 * 4 };
@@ -443,6 +445,7 @@ bool TCPwaitConnData(modbusHandler_t *modH) {
 			// not valid incoming connection at this time
 			//ModbusCloseConn(clientconn->conn);
 			ModbusCloseConnNull(modH);
+    			MP_GATE_TCP_DEBUG_PRINT(DEBUG_TRACE, "TCPwaitConnData:ModbusCloseConnNull not valid incoming connection at this time\n");
 			return xTCPvalid;
 		} else {
 			clientconn->aging = 0;
@@ -458,7 +461,7 @@ bool TCPwaitConnData(modbusHandler_t *modH) {
 		//Close and clean the connection
 		//ModbusCloseConn(clientconn->conn);
 		ModbusCloseConnNull(modH);
-
+  		MP_GATE_TCP_DEBUG_PRINT(DEBUG_TRACE, "TCPwaitConnData:ModbusCloseConnNull the connection was closed\n");
 		clientconn->aging = 0;
 		return xTCPvalid;
 
@@ -466,6 +469,7 @@ bool TCPwaitConnData(modbusHandler_t *modH) {
 
 	if (recv_err == ERR_TIMEOUT) //No new data
 			{
+  		MP_GATE_TCP_DEBUG_PRINT(DEBUG_TRACE, "TCPwaitConnData:ERR_TIMEOUT No new data\n");
 		//continue the aging process
 		modH->newconns[modH->newconnIndex].aging++;
 
@@ -481,6 +485,7 @@ bool TCPwaitConnData(modbusHandler_t *modH) {
 	}
 
 	if (recv_err == ERR_OK) {
+  		MP_GATE_TCP_DEBUG_PRINT(DEBUG_TRACE, "TCPwaitConnData:recv_err == ERR_OK\n");
 		if (netconn_err(clientconn->conn) == ERR_OK) {
 			/* Read the data from the port, blocking if nothing yet there.
 			 We assume the request (the part we care about) is in one netbuf */
@@ -533,6 +538,7 @@ void TCPinitserver(modbusHandler_t *modH) {
 				}
 			}
 		} else {
+			MP_GATE_DEBUG_PRINT(DEBUG_ERROR, "Can't init TCPinitserver\n");
 			while (1) {
 				// error creating new connection check your configuration,
 				// this function must be called after the scheduler is started
@@ -644,13 +650,16 @@ void StartTaskModbusSlave(void *argument) {
 				continue;
 			}
 
-			if (modH->u8Buffer[ID] >= 1 && modH->u8Buffer[ID] <= 5) {
+//			if (modH->u8Buffer[ID] >= 1 && modH->u8Buffer[ID] <= 5) {
+			if (modH->u8Buffer[ID] == 4) {
 				telegram.u8id = modH->u8Buffer[ID]; // slave address
 				telegram.u8fct = modH->u8Buffer[FUNC]; // function code
+  		                MP_GATE_DEBUG_PRINT(DEBUG_TRACE, "rec packet forward for %d port\n",modH->u8Buffer[ID]);
 				switch (modH->u8Buffer[ID]) {
 				case 1:
 					modH_gate = &ModbusH1;
 					telegram.u16reg = ModbusDATA1;
+    			                MP_GATE_DEBUG_PRINT(DEBUG_TRACE, "\n");
 					break;
 				case 2:
 					modH_gate = &ModbusH2;
@@ -748,12 +757,11 @@ void StartTaskModbusSlave(void *argument) {
 
 void ModbusQuery(modbusHandler_t *modH, modbus_t telegram) {
 	//Add the telegram to the TX tail Queue of Modbus
-	if (modH->uModbusType == MB_MASTER) {
+	if (modH->uModbusType == MB_MASTER || modH->uModbusType == MB_MASTER_GATE) { //надо как-то проверять всё ли есть для GATE, но пока так
 		telegram.u32CurrentTask = (uint32_t*) osThreadGetId();
 		xQueueSendToBack(modH->QueueTelegramHandle, &telegram, 0);
 	} else {
-		while (1)
-			; // error a slave cannot send queries as a master
+		while (1); // only master can send queries
 	}
 }
 
@@ -1020,6 +1028,13 @@ void StartTaskModbusMaster(void *argument) {
 			}
 		} else // send a query for USART and USB_CDC
 		{
+		     /*Wait period of silence between modbus frame */
+			 if(modH->port->Init.BaudRate <= 19200)
+			 	osDelay((int)(35000/modH->port->Init.BaudRate) + 2);
+			 else
+			 	osDelay(3);
+
+			MP_GATE_DEBUG_PRINT(DEBUG_TRACE, "send packet on %d port\n",telegram.u8id);
 			SendQuery(modH, telegram);
 			/* Block until a Modbus Frame arrives or query timeouts*/
 			ulNotificationValue = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -1074,12 +1089,40 @@ void StartTaskModbusMaster(void *argument) {
 
 		if (modH->uModbusType == MB_MASTER_GATE) {
 			//the packet needs to be re sent to another port(gate) without processing
-     //сначала найдём modH в который будем отправлять ответ, в telegram есть первоначальный запрос
-  modbusHandler_t *modH_gate = 
+
+			// validate message: id, CRC, FCT, exception
+			int8_t u8exception = validateAnswer(modH);
+			if (u8exception != 0) {
+		                MP_GATE_DEBUG_PRINT(DEBUG_TRACE, "wronf answer on %d port\n",telegram.u8id);
+				modH->i8state = COM_IDLE;
+				modH->i8lastError = u8exception;
+				xTaskNotify((TaskHandle_t )telegram.u32CurrentTask,
+						modH->i8lastError, eSetValueWithOverwrite);
+				continue;
+			}
+			modH->i8lastError = 0;
+			//сначала найдём modH в который будем отправлять ответ, в telegram есть первоначальный запрос
+			modbusHandler_t *modH_gate = &ModbusH;
 	xSemaphoreTake(modH_gate->ModBusSphrHandle , portMAX_DELAY); //before processing the message get the semaphore
-			xSemaphoreGive(modH_gate->ModBusSphrHandle); //Release the semaphore
-			xTaskNotify((TaskHandle_t )telegram.u32CurrentTask, ERR_OK_QUERY,
-					eSetValueWithOverwrite);
+	xSemaphoreTake(modH->ModBusSphrHandle , portMAX_DELAY); //before processing the message get the semaphore
+
+	// process message
+	memcpy(modH_gate->u8Buffer, modH->u8Buffer, modH->u8BufferSize-2);
+        modH_gate->u8BufferSize=modH->u8BufferSize-2;
+		modH_gate->newconnIndex=telegram.u8clientID;
+        MP_GATE_DEBUG_PRINT(DEBUG_TRACE, "resend answer from %d port\n",telegram.u8id);
+        sendTxBuffer(modH_gate);
+	modH->i8state = COM_IDLE;
+
+	if (modH->i8lastError == 0) // no error the error_OK, we need to use a different value than 0 to detect the timeout
+			{
+		xSemaphoreGive(modH->ModBusSphrHandle); //Release the semaphore
+		xSemaphoreGive(modH_gate->ModBusSphrHandle); //Release the semaphore
+				//xTaskNotify((TaskHandle_t )telegram.u32CurrentTask, ERR_OK_QUERY,	eSetValueWithOverwrite);
+	}
+
+
+
 
 		} else {
 
@@ -1238,6 +1281,7 @@ int16_t getRxBuffer(modbusHandler_t *modH) {
 	} else {
 		modH->u8BufferSize = RingGetAllBytes(&modH->xBufferRX, modH->u8Buffer);
 		modH->u16InCnt++;
+                modH->count_in+=modH->u8BufferSize;
 		i16result = modH->u8BufferSize;
 	}
 
@@ -1461,8 +1505,8 @@ static void sendTxBuffer(modbusHandler_t *modH) {
 
 		if (modH->EN_Port != NULL) {
 			//enable transmitter, disable receiver to avoid echo on RS485 transceivers
-			HAL_HalfDuplex_EnableTransmitter(modH->port);
 			HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_SET);
+			//HAL_HalfDuplex_EnableTransmitter(modH->port);
 		}
 
 #if ENABLE_USART_DMA ==1
@@ -1503,7 +1547,7 @@ static void sendTxBuffer(modbusHandler_t *modH) {
 			//return RS485 transceiver to receive mode
 			HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_RESET);
 			//enable receiver, disable transmitter
-			HAL_HalfDuplex_EnableReceiver(modH->port);
+			//HAL_HalfDuplex_EnableReceiver(modH->port);
 
 		}
 
@@ -1570,6 +1614,7 @@ static void sendTxBuffer(modbusHandler_t *modH) {
 #endif
 
 #endif
+        modH->count_out+=modH->u8BufferSize;
 
 	modH->u8BufferSize = 0;
 	// increase message counter

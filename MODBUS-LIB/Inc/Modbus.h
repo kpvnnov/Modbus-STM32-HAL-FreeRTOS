@@ -191,6 +191,9 @@ typedef struct
 	uint8_t u8lastRec;
 	uint16_t *u16regs;
 	uint16_t u16InCnt, u16OutCnt, u16errCnt; //keep statistics of Modbus traffic
+	volatile uint32_t count_in;             //наш труд€га счетчик
+	volatile uint32_t count_out;             //наш труд€га счетчик
+
 	uint16_t u16timeOut;
 	uint16_t u16regsize;
 	uint8_t dataRX;
